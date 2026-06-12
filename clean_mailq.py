@@ -1,4 +1,3 @@
-
 """
 mailq cleanup helper that is safer than postsuper -d all but more efficient
 than manual checks.
@@ -111,25 +110,58 @@ def review_matches(keyword: str, records: List[Dict[str, Any]], max_count: int =
             list of record queue ids to be deleted
     """
     approved: List[str] = []
-    for rec in records:
-        if is_match(rec, keyword):
-            print('===============')
-            print('Queue ID: ', rec['queue_id'])
-            print('Sender:   ', rec.get('sender', ''))
-            print('Arrival:  ', rec.get('arrival', ''))
-            print('Recipients:', ', '.join(rec.get('recipients', [])))
-            if rec.get('reason'):
-                print('Reason:   ', rec['reason'])
-            ans = input('add to delete q? [Y/n/f] ').strip().lower()
-            # treat empty input (Return) as YES
-            if ans == '' or ans in ('y', 'yes'):
-                approved.append(rec['queue_id'])
-                if max_count and len(approved) >= max_count:
-                    return approved, False
-            elif ans in ('f', 'flush'):
-                # flush: stop processing and indicate early exit
-                return approved, True
-            # otherwise continue
+    # action stack for undo support: list of tuples (action, queue_id, record_index)
+    # action is one of 'approve' or 'reject'
+    action_stack: List[tuple] = []
+    idx = 0
+    recs = [r for r in records if is_match(r, keyword)]
+    total = len(recs)
+    while idx < total:
+        rec = recs[idx]
+        print('===============')
+        print('Queue ID: ', rec['queue_id'])
+        print('Sender:   ', rec.get('sender', ''))
+        print('Arrival:  ', rec.get('arrival', ''))
+        print('Recipients:', ', '.join(rec.get('recipients', [])))
+        if rec.get('reason'):
+            print('Reason:   ', rec['reason'])
+
+        prompt = "add to delete q? [Y/n/f/u] "
+        ans = input(prompt).strip().lower()
+        # treat empty input (Return) as YES
+        if ans == '' or ans in ('y', 'yes'):
+            approved.append(rec['queue_id'])
+            action_stack.append(('approve', rec['queue_id'], idx))
+            if max_count and len(approved) >= max_count:
+                return approved, False
+            idx += 1
+            continue
+        if ans in ('n', 'no'):
+            action_stack.append(('reject', rec['queue_id'], idx))
+            idx += 1
+            continue
+        if ans in ('f', 'flush'):
+            # flush: stop processing and indicate early exit
+            return approved, True
+        if ans in ('u', 'undo'):
+            # undo last action if any
+            if not action_stack:
+                print('Nothing to undo.')
+                continue
+            last_action, qid, last_idx = action_stack.pop()
+            if last_action == 'approve':
+                # remove from approved list (last occurrence)
+                try:
+                    approved.remove(qid)
+                except ValueError:
+                    pass
+            # set idx back to the index of the undone record so it will be re-visited
+            idx = last_idx
+            print(f"Undid {last_action} for {qid}; re-processing record.")
+            continue
+        # unrecognized input: treat as no and continue
+        idx += 1
+
     return approved, False
 
 
@@ -155,7 +187,8 @@ def main(argv=None) -> None:
 
     """
     p = argparse.ArgumentParser()
-    p.add_argument('keyword', help="spamword or 'all'")
+    p.add_argument('keyword', nargs='?', default='', help="spamword or 'all' (optional when using --every)")
+    p.add_argument('--every', action='store_true', help='walk every mailq record interactively (no spamword filter)')
     p.add_argument('-y', '--yes', action='store_true', help='auto accept all matches')
     p.add_argument('--max', type=int, default=0, help='maximum number of approvals to collect (0 = no limit)')
     args = p.parse_args(argv)
@@ -171,7 +204,19 @@ def main(argv=None) -> None:
     # this can't just be a set bc we want to preserve order
     to_delete: List[str] = []
     flushed = False
-    if args.keyword == 'all':
+    if args.every:
+        # walk every record interactively (or auto-accept with --yes)
+        if args.yes:
+            # auto collect first N queue ids
+            if args.max:
+                to_delete = [r['queue_id'] for r in records[:args.max]]
+            else:
+                to_delete = [r['queue_id'] for r in records]
+        else:
+            ids, flushed_flag = review_matches('', records, max_count=args.max)
+            to_delete = ids
+            flushed = flushed_flag
+    elif args.keyword == 'all':
         for sw in load_spamwords():
             ids, flushed_flag = review_matches_auto(sw, records, auto_accept=args.yes, max_count=args.max and max(0, args.max - len(to_delete)))
             to_delete.extend(ids)
@@ -197,6 +242,9 @@ def main(argv=None) -> None:
     if not deduped:
         print('No queue IDs approved for deletion.')
         return
+
+    if flushed:
+        print('Note: processing was flushed early; results are partial.')
 
     print(f'Approved {len(deduped)} queue IDs')
     print('\nCommands to run:')
