@@ -32,6 +32,13 @@ To run the program, follow these steps:
 If you want to see a video demo of how to use this, please click this link and request access: https://drive.google.com/file/d/1T9C97OzdA52oNaVM5kAdTpMntDXK2Ueu/view?usp=sharing
 
 
+Advanced Commands:
+
+        -- max : this flag allows you to set an upper bound on the number of emails reviewed
+        -- yes : overrides the need for user confirmation 
+        -- you can now also respond with "f" when reviewing emails to flush/finish on-demand if you run out of time.
+
+
 
 Notes: 
 - Planned updates: I intended to allow upper limits on how many postsuper commands can be printed by the command before exiting. This will help users who only want to/have time to remove 50, 100, etc emails at a time

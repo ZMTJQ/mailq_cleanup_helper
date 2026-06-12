@@ -1,3 +1,4 @@
+
 """
 mailq cleanup helper that is safer than postsuper -d all but more efficient
 than manual checks.
@@ -97,7 +98,7 @@ def is_match(rec: Dict[str, Any], spamword: str) -> bool:
     return False
 
 
-def review_matches(keyword: str, records: List[Dict[str, Any]]) -> List[str]:
+def review_matches(keyword: str, records: List[Dict[str, Any]], max_count: int = 0) -> tuple[List[str], bool]:
     """
     looks for spam word matches in a list of records, asks for user confirmation,
     adds corresponding records to deletion list
@@ -105,6 +106,7 @@ def review_matches(keyword: str, records: List[Dict[str, Any]]) -> List[str]:
         Inputs:
             keyword: spam word to look for
             record: list of records
+            max_count: maximum matches we can find
         Output:
             list of record queue ids to be deleted
     """
@@ -118,20 +120,29 @@ def review_matches(keyword: str, records: List[Dict[str, Any]]) -> List[str]:
             print('Recipients:', ', '.join(rec.get('recipients', [])))
             if rec.get('reason'):
                 print('Reason:   ', rec['reason'])
-            ans = input('add to delete q? [Y/n] ').strip().lower()
+            ans = input('add to delete q? [Y/n/f] ').strip().lower()
             # treat empty input (Return) as YES
             if ans == '' or ans in ('y', 'yes'):
                 approved.append(rec['queue_id'])
-    return approved
+                if max_count and len(approved) >= max_count:
+                    return approved, False
+            elif ans in ('f', 'flush'):
+                # flush: stop processing and indicate early exit
+                return approved, True
+            # otherwise continue
+    return approved, False
 
 
-def review_matches_auto(keyword: str, records: List[Dict[str, Any]], auto_accept: bool = False) -> List[str]:
+def review_matches_auto(keyword: str, records: List[Dict[str, Any]], auto_accept: bool = False, max_count: int = 0) -> tuple[List[str], bool]:
     """
     same as review_matches, but doesn't ask for user confirmation
     """
     if auto_accept:
-        return [rec['queue_id'] for rec in records if is_match(rec, keyword)]
-    return review_matches(keyword, records)
+        matches = [rec['queue_id'] for rec in records if is_match(rec, keyword)]
+        if max_count and len(matches) > max_count:
+            return matches[:max_count], False
+        return matches, False
+    return review_matches(keyword, records, max_count=max_count)
 
 
 def main(argv=None) -> None:
@@ -141,11 +152,12 @@ def main(argv=None) -> None:
 
     Also accepts --yes flag, which eliminates user confirmation checks.
     Only use this if you're very confident that mail is junk.
-    
+
     """
     p = argparse.ArgumentParser()
     p.add_argument('keyword', help="spamword or 'all'")
     p.add_argument('-y', '--yes', action='store_true', help='auto accept all matches')
+    p.add_argument('--max', type=int, default=0, help='maximum number of approvals to collect (0 = no limit)')
     args = p.parse_args(argv)
 
     try:
@@ -156,12 +168,23 @@ def main(argv=None) -> None:
         sys.exit(2)
 
     records = parse_records(text)
+    # this can't just be a set bc we want to preserve order
     to_delete: List[str] = []
+    flushed = False
     if args.keyword == 'all':
         for sw in load_spamwords():
-            to_delete.extend(review_matches_auto(sw, records, auto_accept=args.yes))
+            ids, flushed_flag = review_matches_auto(sw, records, auto_accept=args.yes, max_count=args.max and max(0, args.max - len(to_delete)))
+            to_delete.extend(ids)
+            if flushed_flag:
+                flushed = True
+                break
+            if args.max and len(to_delete) >= args.max:
+                break
     else:
-        to_delete = review_matches_auto(args.keyword, records, auto_accept=args.yes)
+        ids, flushed = review_matches_auto(args.keyword, records, auto_accept=args.yes, max_count=args.max)
+        to_delete = ids
+
+    # if user flushed early, still dedupe and print what we have
 
     # dedupe while preserving order
     seen = set()
